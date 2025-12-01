@@ -412,7 +412,7 @@ export function TimelineBoard({
                 className="relative min-h-full cursor-grab"
                 style={{ width: totalPx, height: Math.max(tasks.length * 40, viewportH) }}
                 onPointerDown={(e) => {
-                  // Begin horizontal panning on left mouse or touch
+                  // Begin 2D panning on left mouse or touch
                   if (e.button !== 0 && e.pointerType !== 'touch') return
                   const scroller = (scrollerRef.current as HTMLElement) || null
                   if (!scroller) return
@@ -421,7 +421,9 @@ export function TimelineBoard({
                     ;(e.currentTarget as unknown as Element).setPointerCapture?.(e.pointerId)
                   } catch {}
                   const startX = e.clientX
+                  const startY = e.clientY
                   const startScrollLeft = scroller.scrollLeft
+                  const startScrollTop = scroller.scrollTop
                   let panning = true
                   // Update cursor
                   const el = e.currentTarget as HTMLElement
@@ -430,7 +432,9 @@ export function TimelineBoard({
                   const onMove = (ev: PointerEvent) => {
                     if (!panning) return
                     const dx = ev.clientX - startX
+                    const dy = ev.clientY - startY
                     scroller.scrollLeft = startScrollLeft - dx
+                    scroller.scrollTop = startScrollTop - dy
                   }
                   const onUp = () => {
                     panning = false
