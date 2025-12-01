@@ -14,7 +14,7 @@ import { arrayMove, SortableContext as SortableContextBase, useSortable } from '
 import { CSS } from '@dnd-kit/utilities'
 import { addDays, differenceInCalendarDays, format, isAfter, isBefore, isValid } from 'date-fns'
 import { ChevronLeft, Plus } from 'lucide-react'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 // dnd-kit JSX typing workaround for React 19
 const SortableCtx = SortableContextBase as unknown as React.FC<any>
@@ -38,6 +38,7 @@ export interface TimelineBoardProps {
   tasks: TimelineTask[]
   setTasks: React.Dispatch<React.SetStateAction<TimelineTask[]>>
   viewport: TimelineViewport
+  onExtendViewport?: (direction: 'left' | 'right', days: number) => void
   onOrderChanged?: (orderedIds: string[], movedId?: string) => void
   onRowDoubleClick?: (taskId: string) => void
 }
@@ -97,9 +98,13 @@ function BarsLayer({
       {/* vertical day grid - full width, no windowing */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="h-full grid" style={{ gridTemplateColumns: `repeat(${days}, ${pxPerDay}px)` }}>
-          {Array.from({ length: days }).map((_, i) => (
-            <div key={i} className={i % 7 === 0 ? 'border-l border-gray-300' : 'border-l border-gray-100'} />
-          ))}
+          {Array.from({ length: days }).map((_, i) => {
+            const currentDate = addDays(viewport.start, i)
+            const isWeekStart = currentDate.getDay() === 0 // Sunday
+            return (
+              <div key={i} className={isWeekStart ? 'border-l border-gray-300' : 'border-l border-gray-100'} />
+            )
+          })}
         </div>
       </div>
 
@@ -229,11 +234,15 @@ const TimelineHeader = React.forwardRef<
           <div className="relative overflow-visible">
             <div style={{ transform: `translateX(-${scrollLeft}px)` }}>
               <div className="grid" style={{ gridTemplateColumns: `repeat(${daysTotal}, ${pxPerDay}px)` }}>
-                {Array.from({ length: daysTotal }).map((_, i) => (
-                  <div key={i} className="h-6 flex items-center justify-center border-l border-gray-100">
-                    {i % 7 === 0 ? format(addDays(viewport.start, i), 'd') : ''}
-                  </div>
-                ))}
+                {Array.from({ length: daysTotal }).map((_, i) => {
+                  const currentDate = addDays(viewport.start, i)
+                  const isWeekStart = currentDate.getDay() === 0 // Sunday
+                  return (
+                    <div key={i} className="h-6 flex items-center justify-center border-l border-gray-100">
+                      {isWeekStart ? format(currentDate, 'd') : ''}
+                    </div>
+                  )
+                })}
               </div>
               {isTodayInOuter && <div className="absolute top-0 bottom-0 w-px bg-blue-600" style={{ left: todayX }} />}
               {isTodayInOuter && (
@@ -267,6 +276,7 @@ export function TimelineBoard({
   tasks,
   setTasks,
   viewport,
+  onExtendViewport,
   onOrderChanged,
   onRowDoubleClick,
 }: TimelineBoardProps) {
@@ -289,6 +299,20 @@ export function TimelineBoard({
   const syncingRef = useRef(false)
   const [viewportH, setViewportH] = useState(0)
   const [scrollLeft, setScrollLeft] = useState(0)
+
+  // Infinite scroll configuration
+  const EDGE_THRESHOLD_PX = 100
+  const EXTEND_DAYS = 30
+
+  // Track pending scroll adjustment after viewport extension
+  const pendingScrollAdjustRef = useRef<number | null>(null)
+  // Debounce extension calls
+  const extensionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Flag to skip edge detection during programmatic scroll adjustments
+  const isAdjustingScrollRef = useRef(false)
+  // Flag to track if an extension is in progress
+  const extensionInProgressRef = useRef(false)
+
   useEffect(() => {
     const el = rightPaneRef.current
     if (!el) return
@@ -298,6 +322,29 @@ export function TimelineBoard({
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  // Adjust scroll position after left-side viewport extension
+  useEffect(() => {
+    if (pendingScrollAdjustRef.current !== null && scrollerRef.current) {
+      const adjustment = pendingScrollAdjustRef.current
+      pendingScrollAdjustRef.current = null
+      
+      // Set flag to skip edge detection during programmatic adjustment
+      isAdjustingScrollRef.current = true
+      
+      // Use requestAnimationFrame to ensure adjustment happens in sync with rendering
+      requestAnimationFrame(() => {
+        if (scrollerRef.current) {
+          scrollerRef.current.scrollLeft += adjustment
+        }
+        // Clear the flag after a frame to allow edge detection again
+        requestAnimationFrame(() => {
+          isAdjustingScrollRef.current = false
+          extensionInProgressRef.current = false
+        })
+      })
+    }
+  }, [viewport.start]) // Trigger when viewport.start changes
 
   const tasksIds = useMemo(() => tasks.map((t) => t.id), [tasks])
 
@@ -344,6 +391,59 @@ export function TimelineBoard({
     const targetScrollLeft = startOffset - scroller.clientWidth / 2
     scroller.scrollTo({ left: targetScrollLeft, behavior: 'smooth' })
   }
+
+  // Handle infinite scroll edge detection
+  const handleEdgeDetection = useCallback(
+    (currentScrollLeft: number, scrollWidth: number, clientWidth: number) => {
+      // Skip if no handler, during programmatic adjustment, or if extension already in progress
+      if (!onExtendViewport || isAdjustingScrollRef.current || extensionInProgressRef.current) {
+        return
+      }
+
+      const atLeftEdge = currentScrollLeft < EDGE_THRESHOLD_PX
+      const atRightEdge = currentScrollLeft + clientWidth > scrollWidth - EDGE_THRESHOLD_PX
+
+      // Clear any pending extension
+      if (extensionTimeoutRef.current) {
+        clearTimeout(extensionTimeoutRef.current)
+      }
+
+      // Debounce to avoid rapid extensions
+      extensionTimeoutRef.current = setTimeout(() => {
+        // Double-check flags before executing
+        if (isAdjustingScrollRef.current || extensionInProgressRef.current) {
+          return
+        }
+
+        if (atLeftEdge) {
+          // Mark extension in progress
+          extensionInProgressRef.current = true
+          // Store scroll adjustment for after state update
+          pendingScrollAdjustRef.current = EXTEND_DAYS * pxPerDay
+          onExtendViewport('left', EXTEND_DAYS)
+        } else if (atRightEdge) {
+          extensionInProgressRef.current = true
+          onExtendViewport('right', EXTEND_DAYS)
+          // For right extension, clear the flag after a short delay
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              extensionInProgressRef.current = false
+            })
+          })
+        }
+      }, 50)
+    },
+    [onExtendViewport, pxPerDay, EDGE_THRESHOLD_PX, EXTEND_DAYS]
+  )
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (extensionTimeoutRef.current) {
+        clearTimeout(extensionTimeoutRef.current)
+      }
+    }
+  }, [])
 
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
@@ -394,8 +494,12 @@ export function TimelineBoard({
               ref={scrollerRef as any}
               onScroll={(e) => {
                 const scroller = e.currentTarget
+                const { scrollLeft: currentScrollLeft, scrollWidth, clientWidth } = scroller
 
-                setScrollLeft(scroller.scrollLeft)
+                setScrollLeft(currentScrollLeft)
+
+                // Infinite scroll edge detection
+                handleEdgeDetection(currentScrollLeft, scrollWidth, clientWidth)
 
                 // vertical sync to left
                 const left = leftScrollerRef.current
@@ -435,6 +539,9 @@ export function TimelineBoard({
                     const dy = ev.clientY - startY
                     scroller.scrollLeft = startScrollLeft - dx
                     scroller.scrollTop = startScrollTop - dy
+
+                    // Trigger edge detection during panning
+                    handleEdgeDetection(scroller.scrollLeft, scroller.scrollWidth, scroller.clientWidth)
                   }
                   const onUp = () => {
                     panning = false
